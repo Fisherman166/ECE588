@@ -1,0 +1,3 @@
+gcc -std=c99 -Wall -o HW2 HW2_pi.c -lpthread 
+
+Array of return values from pthreads: http://stackoverflow.com/questions/15208997/pthread-return-values-to-an-array
