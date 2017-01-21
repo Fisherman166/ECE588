@@ -1,10 +1,19 @@
+//*****************************************************************************
+//
+// Homework 2 - Problem 2 - ECE588
+// Written by: Sean Koppenhafer (Koppen2)
+// 01/20/2017
+//
+//*****************************************************************************
+
 #define _POSIX_C_SOURCE 200809L
-#include <stdio.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <pthread.h>
 #include <sys/time.h>
+
 
 typedef struct {
     uint32_t num_points;
@@ -12,17 +21,18 @@ typedef struct {
 } args_for_threads;
 
 
-void print_error(char*);
 uint32_t parse_cmdline(int, char**, int, int);
 void get_system_time(struct timespec*);
 unsigned long long int calc_runtime(struct timespec, struct timespec);
 void print_results(double, unsigned long long int);
+
 
 pthread_t* allocate_threads(uint32_t);
 args_for_threads* create_threads(pthread_t*, uint32_t, uint32_t);
 uint32_t** run_threads(pthread_t*, uint32_t);
 void* process_points(void*);
 double calculate_pi(uint32_t**, uint32_t, uint32_t);
+
 
 //*****************************************************************************
 // Functions
@@ -56,22 +66,14 @@ int main(int argc, char* argv[]) {
 }
 
 
-void print_error(char* string) {
-    printf("ERROR: %s\n", string);
-}
-
-
 uint32_t parse_cmdline(int argc, char** argv, int arg_position, int args_expected) {
-    char error_str[100];
     uint32_t number_on_cmdline;
     if(argc < args_expected) {
-        sprintf(&error_str[0], "Argc is less than %d for number of threads. Exiting.", args_expected);
-        print_error(&error_str[0]);
+        printf("ERROR: Argc is less than %d for number of threads. Exiting.", args_expected);
         exit(-1);
     }
     if(arg_position >= argc) {
-        sprintf(&error_str[0], "Asked for argument number %d, which is equal to or larger than argc: %d. Exiting.", args_expected, argc);
-        print_error(&error_str[0]);
+        printf("ERROR: Asked for argument number %d, which is equal to or larger than argc: %d. Exiting.", args_expected, argc);
         exit(-2);
     }
     sscanf(argv[arg_position], "%"SCNu32, &number_on_cmdline);
@@ -124,7 +126,7 @@ args_for_threads* create_threads(pthread_t* threads, uint32_t num_points, uint32
         // Add in some variance so that each thread has a different seed. Just calling
         // time makes the seed the same for all threads
         args[i].seed = current_time + (time_t)i;
-        pthread_create(&(threads[i]), NULL, &process_points, (void*)&(args[i]));
+        pthread_create(&threads[i], NULL, &process_points, (void*)&args[i]);
     }
     return args;
 }
@@ -165,6 +167,7 @@ void* process_points(void* void_args) {
     args_for_threads* args = (args_for_threads*)void_args;
     unsigned int seed1 = (unsigned int)(args->seed);
     unsigned int seed2 = (unsigned int)((args->seed) + 1);
+
     uint32_t* in_circle_count = malloc( sizeof(uint32_t) );
     if(in_circle_count == NULL) {
         printf("ERROR: in_circle_count malloc returned NULL.\n");
