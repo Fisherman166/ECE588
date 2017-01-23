@@ -30,10 +30,21 @@ unsigned long long int calc_runtime(struct timespec, struct timespec);
 void print_results(double, unsigned long long int);
 void print_grid(double grid[GRID_X_SIZE][GRID_Y_SIZE]);
 
+
 void init_grid(double grid[GRID_X_SIZE][GRID_Y_SIZE]);
 
 
+bool run_heat_calculations(double grid1[GRID_X_SIZE][GRID_Y_SIZE],
+                           double grid2[GRID_X_SIZE][GRID_Y_SIZE],
+                           uint16_t);
+double get_heat_value(double grid[GRID_X_SIZE][GRID_Y_SIZE], uint16_t, uint16_t);
+double calc_heat_value(double past_grid[GRID_X_SIZE][GRID_Y_SIZE],
+                       uint16_t x, uint16_t y);
 
+
+//*****************************************************************************
+// Main
+//*****************************************************************************
 int main(int argc, char* argv[]) {
     int args_expected = 2;
     struct timespec start_time, end_time;
@@ -43,11 +54,13 @@ int main(int argc, char* argv[]) {
 
     init_grid(heat_grid1);
     init_grid(heat_grid2);
-    print_grid(heat_grid1);
+
+    bool grid1_last_used = run_heat_calculations(heat_grid1, heat_grid2, 6000);
+    print_grid(heat_grid2);
 
     get_system_time(&end_time);
     unsigned long long int runtime = calc_runtime(start_time, end_time);
-    //print_results(pi, runtime);
+    print_results(0.0, runtime);
 
     return 0;
 }
@@ -118,4 +131,54 @@ void init_grid(double grid[GRID_X_SIZE][GRID_Y_SIZE]) {
     }
 }
 
+
+bool run_heat_calculations(double grid1[GRID_X_SIZE][GRID_Y_SIZE],
+                           double grid2[GRID_X_SIZE][GRID_Y_SIZE],
+                           uint16_t time_ticks) {
+    static bool grid1_older = true;
+
+    for(uint16_t tick = 0; tick < time_ticks; tick++) {
+        for(uint16_t x = 1; x < GRID_X_SIZE - 1; x++) {
+            for(uint16_t y = 1; y < GRID_Y_SIZE - 1; y++) {
+                if(grid1_older) grid2[x][y] = calc_heat_value(grid1, x, y);
+                else grid1[x][y] = calc_heat_value(grid2, x, y);
+            }
+        }
+
+        if(grid1_older) grid1_older = false;
+        else grid1_older = true;
+    }
+    return grid1_older;
+}
+
+
+double get_heat_value(double grid[GRID_X_SIZE][GRID_Y_SIZE], uint16_t x, uint16_t y) {
+    const double out_of_bounds_heat_value = 0;
+    double heat_value;
+    bool x_out_of_bounds = (x < 0.0) || (x > GRID_X_SIZE);
+    bool y_out_of_bounds = (y < 0.0) || (y > GRID_Y_SIZE);
+
+    if( x_out_of_bounds || y_out_of_bounds) heat_value = out_of_bounds_heat_value;
+    else heat_value = grid[x][y];
+
+    return heat_value;
+}
+
+
+double calc_heat_value(double past_grid[GRID_X_SIZE][GRID_Y_SIZE],
+                       uint16_t x, uint16_t y) {
+    const double Cx = 0.12;
+    const double Cy = 0.1;
+    double Uxy = get_heat_value(past_grid, x, y);
+    double Uxm1y = get_heat_value(past_grid, x - 1, y);
+    double Uxp1y = get_heat_value(past_grid, x + 1, y);
+    double Uxym1 = get_heat_value(past_grid, x, y - 1);
+    double Uxyp1 = get_heat_value(past_grid, x, y + 1);
+
+    double result = Uxy + \
+                    Cx * (Uxp1y + Uxm1y - (2.0 * Uxy)) + \
+                    Cy * (Uxyp1 + Uxym1 - (2.0 * Uxy));
+
+    return result;
+}
 
