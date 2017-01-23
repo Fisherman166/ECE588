@@ -15,10 +15,9 @@
 #include <sys/time.h>
 
 
-typedef struct {
-    uint32_t num_points;
-    time_t seed;
-} args_for_threads;
+static uint32_t num_points_per_thread;
+static uint32_t global_circle_hit_count = 0;
+static pthread_mutex_t circle_count_lock;
 
 
 uint32_t parse_cmdline(int, char**, int, int);
@@ -28,10 +27,10 @@ void print_results(double, unsigned long long int);
 
 
 pthread_t* allocate_threads(uint32_t);
-args_for_threads* create_threads(pthread_t*, uint32_t, uint32_t);
-uint32_t** run_threads(pthread_t*, uint32_t);
+void create_threads(pthread_t*, uint32_t, uint32_t);
+void run_threads(pthread_t*, uint32_t);
 void* process_points(void*);
-double calculate_pi(uint32_t**, uint32_t, uint32_t);
+double calculate_pi(uint32_t, uint32_t);
 
 
 //*****************************************************************************
@@ -46,21 +45,22 @@ int main(int argc, char* argv[]) {
     uint32_t number_of_points = parse_cmdline(argc, &argv[0], 1, args_expected);
     uint32_t number_of_threads = parse_cmdline(argc, &argv[0], 2, args_expected);
 
+    int retval = pthread_mutex_init(&circle_count_lock, NULL);
+    if(retval) {
+        printf("ERROR: Failed to init circle_count_lock mutex.\n");
+        exit(-1);
+    }
     pthread_t* threads = allocate_threads(number_of_threads);
-    args_for_threads* args = create_threads(threads, number_of_points, number_of_threads);
-    uint32_t** results = run_threads(threads, number_of_threads);
+    create_threads(threads, number_of_points, number_of_threads);
+    run_threads(threads, number_of_threads);
 
-    pi = calculate_pi(results, number_of_points, number_of_threads);
     get_system_time(&end_time);
     unsigned long long int runtime = calc_runtime(start_time, end_time);
+    pi = calculate_pi(global_circle_hit_count, number_of_points);
     print_results(pi, runtime);
 
     free(threads);
-    free(args);
-    for(uint32_t i = 0; i < number_of_threads; i++) {
-        free(results[i]);
-    }
-    free(results);
+    pthread_mutex_destroy(&circle_count_lock);
 
     return 0;
 }
@@ -112,38 +112,24 @@ pthread_t* allocate_threads(uint32_t number_of_threads) {
 }
 
 
-args_for_threads* create_threads(pthread_t* threads, uint32_t num_points, uint32_t number_of_threads) {
-    uint32_t points_per_thread = num_points / number_of_threads;
+void create_threads(pthread_t* threads, uint32_t num_points, uint32_t number_of_threads) {
+    num_points_per_thread = num_points / number_of_threads;
     time_t current_time = time(NULL);
-    args_for_threads* args = malloc( sizeof(args_for_threads) * number_of_threads );
-    if(args == NULL) {
-        printf("ERROR: args malloc returned NULL. Attempted to malloc %u args\n", number_of_threads);
-        exit(-1);
-    }
+    time_t seed;
 
     for(uint32_t i = 0; i < number_of_threads; i++) {
-        args[i].num_points = points_per_thread;
         // Add in some variance so that each thread has a different seed. Just calling
         // time makes the seed the same for all threads
-        args[i].seed = current_time + (time_t)i;
-        pthread_create(&threads[i], NULL, &process_points, (void*)&args[i]);
+        seed = current_time + (time_t)i;
+        pthread_create(&threads[i], NULL, &process_points, (void*)seed);
     }
-    return args;
 }
 
 
-uint32_t** run_threads(pthread_t* threads, uint32_t number_of_threads) {
-    uint32_t** results = malloc( sizeof(uint32_t*) * number_of_threads );
-    if(results == NULL) {
-        printf("ERROR: results malloc returned NULL. Attempted to malloc %u args\n", number_of_threads);
-        exit(-1);
-    }
-
+void run_threads(pthread_t* threads, uint32_t number_of_threads) {
     for(uint32_t i = 0; i < number_of_threads; i++) {
-        pthread_join(threads[i], (void**)&results[i]);
+        pthread_join(threads[i], NULL);
     }
-    
-    return results;
 }
 
 
@@ -160,21 +146,16 @@ static double square_cord(double cord) {
 }
 
 
-// Function that is called in many different threads to process the results
+// Function that is called in many different threads count the number of points in the circle
 void* process_points(void* void_args) {
     double random_num_x, random_num_y;
     double x_cord, y_cord;
-    args_for_threads* args = (args_for_threads*)void_args;
-    unsigned int seed1 = (unsigned int)(args->seed);
-    unsigned int seed2 = (unsigned int)((args->seed) + 1);
+    unsigned int seed = (unsigned int)void_args;
+    unsigned int seed1 = seed;
+    unsigned int seed2 = seed + 1;
+    uint32_t in_circle_count = 0;
 
-    uint32_t* in_circle_count = malloc( sizeof(uint32_t) );
-    if(in_circle_count == NULL) {
-        printf("ERROR: in_circle_count malloc returned NULL.\n");
-        exit(-1);
-    }
-
-    for(uint32_t i = 0; i < args->num_points; i++) {
+    for(uint32_t i = 0; i < num_points_per_thread; i++) {
         random_num_x = gen_random_num(&seed1);
         random_num_y = gen_random_num(&seed2);
         x_cord = (2.0 * random_num_x) - 1.0;
@@ -182,22 +163,20 @@ void* process_points(void* void_args) {
 
         // This somehow figures out if the cords are in the circle
         if( (square_cord(x_cord) + square_cord(y_cord)) <= 1.0 ) {
-            *in_circle_count += 1;
+            in_circle_count++;
         }
     }
-    return in_circle_count;
+    pthread_mutex_lock(&circle_count_lock);
+        global_circle_hit_count += in_circle_count;
+    pthread_mutex_unlock(&circle_count_lock);
+
+    pthread_exit(0);
 }
 
 
-double calculate_pi(uint32_t** circle_counts, uint32_t num_points, uint32_t num_of_threads) {
+double calculate_pi(uint32_t total_hits, uint32_t num_points) {
     double pi; 
-    uint32_t total_score = 0;
-
-    for(uint32_t i = 0; i < num_of_threads; i++) {
-        total_score += *circle_counts[i];
-    }
-    pi = (4.0 * (double)(total_score)) / (double)(num_points);
-
+    pi = (4.0 * (double)total_hits) / (double)num_points;
     return pi;
 }
 
