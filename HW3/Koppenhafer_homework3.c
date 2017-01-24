@@ -33,7 +33,6 @@ static pthread_t* threads = NULL;
 static pthread_mutex_t* mutexs = NULL;
 static uint16_t* thread_cycles = NULL;
 static thread_args* args = NULL;
-static bool global_grid1_older = true; // Only thead 1 updates this
 static uint32_t number_of_threads;
 
 //*****************************************************************************
@@ -42,7 +41,7 @@ static uint32_t number_of_threads;
 uint32_t parse_cmdline(int, char**, int, int);
 void get_system_time(struct timespec*);
 unsigned long long int calc_runtime(struct timespec, struct timespec);
-void print_results(double, unsigned long long int);
+void print_interval_step(double grid[GRID_X_SIZE][GRID_Y_SIZE]);
 void print_grid(double grid[GRID_X_SIZE][GRID_Y_SIZE]);
 
 
@@ -57,9 +56,9 @@ thread_args* create_threads(pthread_t*, uint32_t);
 
 void run_threads(pthread_t*, uint32_t);
 void* run_heat_calculations(void*);
-double get_heat_value(double grid[GRID_X_SIZE][GRID_Y_SIZE], uint16_t, uint16_t);
+double get_heat_value(double grid[GRID_X_SIZE][GRID_Y_SIZE], int, int);
 double calc_heat_value(double past_grid[GRID_X_SIZE][GRID_Y_SIZE],
-                       uint16_t x, uint16_t y);
+                       int, int);
 
 void cleanup();
 
@@ -84,12 +83,11 @@ int main(int argc, char* argv[]) {
     args = create_threads(threads, number_of_threads);
 
     run_threads(threads, number_of_threads);
-    print_grid(heat_grid2);
+    //print_grid(heat_grid2);
 
     get_system_time(&end_time);
     unsigned long long int runtime = calc_runtime(start_time, end_time);
-    print_results(0.0, runtime);
-
+    printf("Time = %llu nanoseconds\t(%llu.%09llu sec)\n", runtime, runtime / 1000000000, runtime % 1000000000);
     cleanup();
 
     return 0;
@@ -129,9 +127,10 @@ unsigned long long int calc_runtime(struct timespec start_time, struct timespec 
 }
 
 
-void print_results(double pi, unsigned long long int runtime) {
-    printf("The value of pi is %.22f\n", pi);
-    printf("Time = %llu nanoseconds\t(%llu.%09llu sec)\n", runtime, runtime / 1000000000, runtime % 1000000000);
+void print_interval_step(double grid[GRID_X_SIZE][GRID_Y_SIZE]) {
+    printf("(1,1): %f, (150,150): %f, (400,400): %f, (500,500): %f, (750,750): %f, (900,900): %f\n",
+           heat_grid2[1][1], heat_grid2[150][150], heat_grid2[400][400], heat_grid2[500][500],
+           heat_grid2[750][750], heat_grid2[900][900]);
 }
 
 
@@ -222,7 +221,7 @@ thread_args* create_threads(pthread_t* threads, uint32_t number_of_threads) {
         args[i].thread_id = i;
         args[i].start_x = x_per_thread * i;
         args[i].end_x = x_per_thread * (i + 1);
-        args[i].time_ticks = 500;
+        args[i].time_ticks = 6000;
         //args[i].grid1 = heat_grid1;
         //args[i].grid2 = heat_grid2;
         pthread_create(&threads[i], NULL, &run_heat_calculations, (void*)&args[i]);
@@ -245,30 +244,33 @@ void* run_heat_calculations(void* void_args) {
     for(uint16_t tick = 0; tick < args->time_ticks; tick++) {
         for(uint16_t x = args->start_x; x < args->end_x; x++) {
             for(uint16_t y = 0; y < GRID_Y_SIZE; y++) {
-                if(local_grid1_older) heat_grid2[x][y] = calc_heat_value(heat_grid1, x, y);
-                else heat_grid1[x][y] = calc_heat_value(heat_grid2, x, y);
+                if(local_grid1_older) heat_grid2[x][y] = calc_heat_value(heat_grid1, (int)x, (int)y);
+                else heat_grid1[x][y] = calc_heat_value(heat_grid2, (int)x, (int)y);
             }
         }
 
+        // Thread 0 prints the required info at 200 cycle intervals
+        // Do this first so that cycle 200 is complete but we haven't flipped
+        // to the new array yet - actually showing the data from cycle 200
         if(args->thread_id == 0) {
-            if(local_grid1_older) global_grid1_older = false;
-            else global_grid1_older = true;
-
-            if( (thread_cycles[args->thread_id] % 5) == 0 ) {
-                if(local_grid1_older)
-                    printf("%f, %f, %f, %f\n", heat_grid2[1][1], heat_grid2[150][150], heat_grid2[400][400], heat_grid2[500][500]); 
-                else
-                    printf("%f, %f, %f, %f\n", heat_grid1[1][1], heat_grid1[150][150], heat_grid1[400][400], heat_grid1[500][500]); 
+            if( (thread_cycles[args->thread_id] % 200) == 0 ) {
+                if(local_grid1_older) print_interval_step(heat_grid2);
+                else print_interval_step(heat_grid1);
             }
         }
+
+        // Flip to the other array to use as the reference data
         if(local_grid1_older) local_grid1_older = false;
         else local_grid1_older = true;
 
+        // This is the only place a thread can write to this value
         pthread_mutex_lock(&mutexs[args->thread_id]);
-            thread_cycles[args->thread_id] += thread_cycles[args->thread_id] + 1;
+            thread_cycles[args->thread_id] += 1;
         pthread_mutex_unlock(&mutexs[args->thread_id]);
 
-        // Wait on previous thread to catch up
+        // Wait on previous thread to catch if not the left most thread
+        // Do not need to get the mutex for our own thread since we are the only one that
+        // can write our own cycles
         bool exit_loop = false;
         if(args->thread_id != 0) {
             while(!exit_loop) {
@@ -279,7 +281,9 @@ void* run_heat_calculations(void* void_args) {
             }
         }
 
-        // Wait for next thread to catch up as long as not the last thread
+        // Wait for next thread to catch up if not the right most thread.
+        // Do not need to get the mutex for our own thread since we are the only one that
+        // can write our own cycles
         exit_loop = false;
         if(args->thread_id != (number_of_threads - 1) ) {
             while(!exit_loop) {
@@ -295,11 +299,11 @@ void* run_heat_calculations(void* void_args) {
 }
 
 
-double get_heat_value(double grid[GRID_X_SIZE][GRID_Y_SIZE], uint16_t x, uint16_t y) {
+double get_heat_value(double grid[GRID_X_SIZE][GRID_Y_SIZE], int x, int y) {
     const double out_of_bounds_heat_value = 0;
     double heat_value;
-    bool x_out_of_bounds = (x < 0.0) || (x > GRID_X_SIZE);
-    bool y_out_of_bounds = (y < 0.0) || (y > GRID_Y_SIZE);
+    bool x_out_of_bounds = (x < 0) || (x >= GRID_X_SIZE);
+    bool y_out_of_bounds = (y < 0) || (y >= GRID_Y_SIZE);
 
     if( x_out_of_bounds || y_out_of_bounds) heat_value = out_of_bounds_heat_value;
     else heat_value = grid[x][y];
@@ -309,7 +313,7 @@ double get_heat_value(double grid[GRID_X_SIZE][GRID_Y_SIZE], uint16_t x, uint16_
 
 
 double calc_heat_value(double past_grid[GRID_X_SIZE][GRID_Y_SIZE],
-                       uint16_t x, uint16_t y) {
+                       int x, int y) {
     const double Cx = 0.12;
     const double Cy = 0.1;
     double Uxy = get_heat_value(past_grid, x, y);
