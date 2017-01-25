@@ -32,6 +32,7 @@ static thread_args* args = NULL;
 
 static pthread_mutex_t cycle_mutex;
 static pthread_cond_t enable_all_threads;
+static pthread_cond_t monitor_check;
 
 static uint32_t number_of_threads;
 static uint32_t threads_done;
@@ -84,6 +85,11 @@ int main(int argc, char* argv[]) {
         exit(-2);
     }
     retval = pthread_cond_init(&enable_all_threads, NULL);
+    if(retval) {
+        printf("ERROR: Could not init cond var\n");
+        exit(-2);
+    }
+    retval = pthread_cond_init(&monitor_check, NULL);
     if(retval) {
         printf("ERROR: Could not init cond var\n");
         exit(-2);
@@ -243,6 +249,7 @@ void* run_heat_calculations(void* void_args) {
 
         pthread_mutex_lock(&cycle_mutex);
             threads_done |= local_thread_shift;
+            pthread_cond_signal(&monitor_check);
             while(threads_done & local_thread_shift) {
                 pthread_cond_wait(&enable_all_threads, &cycle_mutex);
             }
@@ -266,19 +273,19 @@ void* monitor(void* args) {
 
         while(1) {
             pthread_mutex_lock(&cycle_mutex);
-                if(threads_done == threads_done_mask) {
-                    threads_done = 0;
-                    pthread_mutex_unlock(&cycle_mutex);
-                    pthread_cond_broadcast(&enable_all_threads);
-                    break;
-                }
+            while(threads_done != threads_done_mask) {
+                pthread_cond_wait(&monitor_check, &cycle_mutex);
+            }
+            threads_done = 0;
             pthread_mutex_unlock(&cycle_mutex);
+            pthread_cond_broadcast(&enable_all_threads);
+            break;
         }
         grid1_is_older ^= 1;
     }
-
     return 0;
 }
+
 
 float get_heat_value(float grid[GRID_X_SIZE][GRID_Y_SIZE], int x, int y) {
     const float out_of_bounds_heat_value = 0;
@@ -318,6 +325,11 @@ void cleanup() {
         exit(-2);
     }
     retval = pthread_cond_destroy(&enable_all_threads);
+    if(retval) {
+        printf("ERROR: Could not destroy cond var\n");
+        exit(-2);
+    }
+    retval = pthread_cond_destroy(&monitor_check);
     if(retval) {
         printf("ERROR: Could not destroy cond var\n");
         exit(-2);
