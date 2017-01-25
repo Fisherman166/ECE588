@@ -28,11 +28,14 @@ typedef struct {
 static double heat_grid1[GRID_X_SIZE][GRID_Y_SIZE];
 static double heat_grid2[GRID_X_SIZE][GRID_Y_SIZE];
 static pthread_t* threads = NULL;
-static pthread_mutex_t* mutexs = NULL;
-static pthread_cond_t* condition_vars = NULL;
-static uint16_t* thread_cycles = NULL;
 static thread_args* args = NULL;
+
+static pthread_mutex_t cycle_mutex;
+static pthread_cond_t enable_all_threads;
+
 static uint32_t number_of_threads;
+static uint32_t threads_done;
+static uint32_t threads_done_mask;
 
 //*****************************************************************************
 // Helper Functions
@@ -46,17 +49,14 @@ void print_grid(double grid[GRID_X_SIZE][GRID_Y_SIZE]);
 
 //init
 void init_grid(double grid[GRID_X_SIZE][GRID_Y_SIZE]);
+uint32_t gen_thread_mask(uint32_t);
 pthread_t* allocate_threads(uint32_t);
-pthread_mutex_t* allocate_mutexs(uint32_t);
-pthread_cond_t* allocate_cond_vars(uint32_t);
-uint16_t* allocate_thread_cycles(uint32_t);
-void init_mutexs(pthread_mutex_t*, uint32_t);
-void init_cond_vars(pthread_cond_t*, uint32_t);
 thread_args* create_threads(pthread_t*, uint32_t);
 
 
 void run_threads(pthread_t*, uint32_t);
 void* run_heat_calculations(void*);
+void* monitor(void*);
 double get_heat_value(double grid[GRID_X_SIZE][GRID_Y_SIZE], int, int);
 double calc_heat_value(double past_grid[GRID_X_SIZE][GRID_Y_SIZE],
                        int, int);
@@ -78,13 +78,19 @@ int main(int argc, char* argv[]) {
     init_grid(heat_grid2);
 
     threads = allocate_threads(number_of_threads);
-    mutexs = allocate_mutexs(number_of_threads);
-    condition_vars = allocate_cond_vars(number_of_threads);
-    init_mutexs(mutexs, number_of_threads);
-    init_cond_vars(condition_vars, number_of_threads);
-    thread_cycles = allocate_thread_cycles(number_of_threads);
-    args = create_threads(threads, number_of_threads);
+    int retval = pthread_mutex_init(&cycle_mutex, NULL);
+    if(retval) {
+        printf("ERROR: Could not init mutex\n");
+        exit(-2);
+    }
+    retval = pthread_cond_init(&enable_all_threads, NULL);
+    if(retval) {
+        printf("ERROR: Could not init cond var\n");
+        exit(-2);
+    }
 
+    threads_done_mask = gen_thread_mask(number_of_threads);
+    args = create_threads(threads, number_of_threads);
     run_threads(threads, number_of_threads);
     //print_grid(heat_grid2);
 
@@ -146,6 +152,18 @@ void print_grid(double grid[GRID_X_SIZE][GRID_Y_SIZE]) {
 }
 
 
+uint32_t gen_thread_mask(uint32_t number_of_threads) {
+    uint32_t thread_mask = 0;
+    
+    for(uint32_t i = 0; i < number_of_threads; i++) {
+        thread_mask <<= 1;
+        thread_mask |= 0x1;
+    }
+
+    return thread_mask;
+}
+
+
 //*****************************************************************************
 // Init Functions
 //*****************************************************************************
@@ -165,7 +183,7 @@ void init_grid(double grid[GRID_X_SIZE][GRID_Y_SIZE]) {
 
 
 pthread_t* allocate_threads(uint32_t number_of_threads) {
-    pthread_t* threads = malloc( sizeof(pthread_t) * number_of_threads );
+    pthread_t* threads = malloc( sizeof(pthread_t) * (number_of_threads + 1) );
     if(threads == NULL) {
         printf("ERROR: Threads malloc returned NULL. Attempted to malloc %u threads\n", number_of_threads);
         exit(-1);
@@ -174,67 +192,8 @@ pthread_t* allocate_threads(uint32_t number_of_threads) {
 }
 
 
-pthread_mutex_t* allocate_mutexs(uint32_t number_of_threads) {
-    pthread_mutex_t* mutexs = malloc( sizeof(pthread_mutex_t) * number_of_threads );
-    if(mutexs == NULL) {
-        printf("ERROR: Mutexs malloc returned NULL. Attempted to malloc %u mutexs\n", number_of_threads);
-        exit(-1);
-    }
-    return mutexs;
-}
-
-
-pthread_cond_t* allocate_cond_vars(uint32_t number_of_threads) {
-    pthread_cond_t* cond_vars = malloc( sizeof(pthread_cond_t) * number_of_threads );
-    if( cond_vars == NULL) {
-        printf("ERROR: Cond vars malloc returned NULL. Attempted to malloc %u mutexs\n", number_of_threads);
-        exit(-1);
-    }
-    return cond_vars;
-}
-
-
-uint16_t* allocate_thread_cycles(uint32_t number_of_threads) {
-    uint16_t* thread_cycles = malloc( sizeof(uint16_t) * number_of_threads );
-    if(thread_cycles == NULL) {
-        printf("ERROR: thread_cycles malloc returned NULL. Attempted to malloc %u thread_cycles\n", number_of_threads);
-        exit(-1);
-    }
-    
-    // Initialize to 0
-    for(uint32_t i = 0; i < number_of_threads; i++) {
-        thread_cycles[i] = 0;
-    }
-
-    return thread_cycles;
-}
-
-
-void init_mutexs(pthread_mutex_t* mutexs, uint32_t number_of_threads) {
-    int retval;
-    for(uint32_t i = 0; i < number_of_threads; i++) {
-        retval = pthread_mutex_init(&mutexs[i], NULL);
-        if(retval) {
-            printf("ERROR: Could not init mutex number %u\n", i);
-            exit(-2);
-        }
-    }
-}
-
-
-void init_cond_vars(pthread_cond_t* condition_vars, uint32_t number_of_threads) {
-    int retval;
-    for(uint32_t i = 0; i < number_of_threads; i++) {
-        retval = pthread_cond_init(&condition_vars[i], NULL);
-        if(retval) {
-            printf("ERROR: Could not init cond var number %u\n", i);
-            exit(-2);
-        }
-    }
-}
-
-
 thread_args* create_threads(pthread_t* threads, uint32_t number_of_threads) {
+    uint16_t time_ticks = 6000;
     uint16_t x_per_thread = GRID_X_SIZE / number_of_threads;
     thread_args* args = malloc( sizeof(thread_args) * number_of_threads);
     if(args == NULL) {
@@ -246,9 +205,13 @@ thread_args* create_threads(pthread_t* threads, uint32_t number_of_threads) {
         args[i].thread_id = i;
         args[i].start_x = x_per_thread * i;
         args[i].end_x = x_per_thread * (i + 1);
-        args[i].time_ticks = 6000;
+        args[i].time_ticks = time_ticks;
         pthread_create(&threads[i], NULL, &run_heat_calculations, (void*)&args[i]);
     }
+    
+    //Create monitor thread
+    pthread_create(&threads[number_of_threads], NULL, &monitor, (void*)time_ticks);
+
     return args;
 }
 
@@ -264,6 +227,7 @@ void* run_heat_calculations(void* void_args) {
     thread_args* args = (thread_args*)void_args;
     bool local_grid1_older = true;
     uint16_t local_cycle_count = 0;
+    uint32_t local_thread_shift = 1 << args->thread_id;
 
     for(uint16_t tick = 0; tick < args->time_ticks; tick++) {
         for(uint16_t x = args->start_x; x < args->end_x; x++) {
@@ -288,40 +252,37 @@ void* run_heat_calculations(void* void_args) {
         if(local_grid1_older) local_grid1_older = false;
         else local_grid1_older = true;
 
-        // This is the only place a thread can write to this value
-        pthread_mutex_lock(&mutexs[args->thread_id]);
-            thread_cycles[args->thread_id] = local_cycle_count;
-            pthread_cond_broadcast(&condition_vars[args->thread_id]);
-        pthread_mutex_unlock(&mutexs[args->thread_id]);
-
-
-        if(args->thread_id != 0) {
-            pthread_mutex_lock(&mutexs[args->thread_id - 1]);
-                while( local_cycle_count != thread_cycles[args->thread_id - 1] )
-                    pthread_cond_wait(&condition_vars[args->thread_id - 1], &mutexs[args->thread_id - 1]);
-            pthread_mutex_unlock(&mutexs[args->thread_id - 1]);
-        }
-
-        pthread_mutex_lock(&mutexs[args->thread_id]);
-            pthread_cond_broadcast(&condition_vars[args->thread_id]);
-        pthread_mutex_unlock(&mutexs[args->thread_id]);
-
-        if(args->thread_id != (number_of_threads - 1)) {
-            pthread_mutex_lock(&mutexs[args->thread_id + 1]);
-                while( local_cycle_count != thread_cycles[args->thread_id + 1] )
-                    pthread_cond_wait(&condition_vars[args->thread_id + 1], &mutexs[args->thread_id + 1]);
-            pthread_mutex_unlock(&mutexs[args->thread_id + 1]);
-
-        }
-
-        pthread_mutex_lock(&mutexs[args->thread_id]);
-            pthread_cond_broadcast(&condition_vars[args->thread_id]);
-        pthread_mutex_unlock(&mutexs[args->thread_id]);
+        pthread_mutex_lock(&cycle_mutex);
+            threads_done |= local_thread_shift;
+            while(threads_done & local_thread_shift) {
+                pthread_cond_wait(&enable_all_threads, &cycle_mutex);
+            }
+        pthread_mutex_unlock(&cycle_mutex);
     }
 
     pthread_exit(0);
 }
 
+
+void* monitor(void* args) {
+    uint16_t iterations = (int16_t)args;
+
+    for(uint32_t cycle = 0; cycle < iterations; cycle++) {
+        while(1) {
+            pthread_mutex_lock(&cycle_mutex);
+                //printf("threads_done: %u\n", threads_done);
+                if(threads_done == threads_done_mask) {
+                    threads_done = 0;
+                    pthread_mutex_unlock(&cycle_mutex);
+                    pthread_cond_broadcast(&enable_all_threads);
+                    break;
+                }
+            pthread_mutex_unlock(&cycle_mutex);
+        }
+    }
+
+    return 0;
+}
 
 double get_heat_value(double grid[GRID_X_SIZE][GRID_Y_SIZE], int x, int y) {
     const double out_of_bounds_heat_value = 0;
@@ -355,23 +316,18 @@ double calc_heat_value(double past_grid[GRID_X_SIZE][GRID_Y_SIZE],
 
 void cleanup() {
     int retval;
-    for(uint32_t i = 0; i < number_of_threads; i++) {
-        retval = pthread_mutex_destroy(&mutexs[i]);
-        if(retval) {
-            printf("ERROR: Could not destroy mutex number %u\n", i);
-            exit(-2);
-        }
-        retval = pthread_cond_destroy(&condition_vars[i]);
-        if(retval) {
-            printf("ERROR: Could not destroy cond var number %u\n", i);
-            exit(-2);
-        }
+    retval = pthread_mutex_destroy(&cycle_mutex);
+    if(retval) {
+        printf("ERROR: Could not destroy mutex\n");
+        exit(-2);
+    }
+    retval = pthread_cond_destroy(&enable_all_threads);
+    if(retval) {
+        printf("ERROR: Could not destroy cond var\n");
+        exit(-2);
     }
 
     free(threads);
-    free(mutexs);
-    free(condition_vars);
-    free(thread_cycles);
     free(args);
 }
 
