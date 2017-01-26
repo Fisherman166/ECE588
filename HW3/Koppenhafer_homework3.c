@@ -1,8 +1,8 @@
 //*****************************************************************************
 //
-// Homework 2 - Problem 2 - ECE588
+// Homework 3 - ECE588
 // Written by: Sean Koppenhafer (Koppen2)
-// 01/20/2017
+// 01/25/2017
 //
 //*****************************************************************************
 
@@ -23,17 +23,20 @@ typedef struct {
     uint16_t start_x;
     uint16_t end_x;
     uint16_t time_ticks;
-    //grid1[GRID_X_SIZE][GRID_Y_SIZE];
-    //grid2[GRID_X_SIZE][GRID_Y_SIZE];
 } thread_args;
 
-static double heat_grid1[GRID_X_SIZE][GRID_Y_SIZE];
-static double heat_grid2[GRID_X_SIZE][GRID_Y_SIZE];
+static float heat_grid1[GRID_X_SIZE][GRID_Y_SIZE];
+static float heat_grid2[GRID_X_SIZE][GRID_Y_SIZE];
 static pthread_t* threads = NULL;
-static pthread_mutex_t* mutexs = NULL;
-static uint16_t* thread_cycles = NULL;
 static thread_args* args = NULL;
+
+static pthread_mutex_t cycle_mutex;
+static pthread_cond_t enable_all_threads;
+static pthread_cond_t monitor_check;
+
 static uint32_t number_of_threads;
+static uint32_t threads_done;
+static uint32_t all_threads_done_mask;
 
 //*****************************************************************************
 // Helper Functions
@@ -41,23 +44,22 @@ static uint32_t number_of_threads;
 uint32_t parse_cmdline(int, char**, int, int);
 void get_system_time(struct timespec*);
 unsigned long long int calc_runtime(struct timespec, struct timespec);
-void print_interval_step(double grid[GRID_X_SIZE][GRID_Y_SIZE]);
-void print_grid(double grid[GRID_X_SIZE][GRID_Y_SIZE]);
+void print_interval_step(float grid[GRID_X_SIZE][GRID_Y_SIZE], uint16_t);
 
 
 //init
-void init_grid(double grid[GRID_X_SIZE][GRID_Y_SIZE]);
+void init_grid(float grid[GRID_X_SIZE][GRID_Y_SIZE]);
+void init_mutex_and_cond();
+uint32_t gen_thread_mask(uint32_t);
 pthread_t* allocate_threads(uint32_t);
-pthread_mutex_t* allocate_mutexs(uint32_t);
-uint16_t* allocate_thread_cycles(uint32_t);
-void init_mutexs(pthread_mutex_t*, uint32_t);
 thread_args* create_threads(pthread_t*, uint32_t);
 
 
 void run_threads(pthread_t*, uint32_t);
 void* run_heat_calculations(void*);
-double get_heat_value(double grid[GRID_X_SIZE][GRID_Y_SIZE], int, int);
-double calc_heat_value(double past_grid[GRID_X_SIZE][GRID_Y_SIZE],
+void* monitor(void*);
+float get_heat_value(float grid[GRID_X_SIZE][GRID_Y_SIZE], int, int);
+float calc_heat_value(float past_grid[GRID_X_SIZE][GRID_Y_SIZE],
                        int, int);
 
 void cleanup();
@@ -75,15 +77,12 @@ int main(int argc, char* argv[]) {
 
     init_grid(heat_grid1);
     init_grid(heat_grid2);
-
     threads = allocate_threads(number_of_threads);
-    mutexs = allocate_mutexs(number_of_threads);
-    init_mutexs(mutexs, number_of_threads);
-    thread_cycles = allocate_thread_cycles(number_of_threads);
-    args = create_threads(threads, number_of_threads);
+    init_mutex_and_cond();
+    all_threads_done_mask = gen_thread_mask(number_of_threads);
 
+    args = create_threads(threads, number_of_threads);
     run_threads(threads, number_of_threads);
-    //print_grid(heat_grid2);
 
     get_system_time(&end_time);
     unsigned long long int runtime = calc_runtime(start_time, end_time);
@@ -127,42 +126,70 @@ unsigned long long int calc_runtime(struct timespec start_time, struct timespec 
 }
 
 
-void print_interval_step(double grid[GRID_X_SIZE][GRID_Y_SIZE]) {
-    printf("(1,1): %f, (150,150): %f, (400,400): %f, (500,500): %f, (750,750): %f, (900,900): %f\n",
+void print_interval_step(float grid[GRID_X_SIZE][GRID_Y_SIZE], uint16_t cycle) {
+    printf("Cycle: %u. (1,1): %f, (150,150): %f, (400,400): %f, (500,500): %f, (750,750): %f, (900,900): %f\n",
+           cycle,
            heat_grid2[1][1], heat_grid2[150][150], heat_grid2[400][400], heat_grid2[500][500],
            heat_grid2[750][750], heat_grid2[900][900]);
 }
 
 
-void print_grid(double grid[GRID_X_SIZE][GRID_Y_SIZE]) {
-    for(uint16_t x = 0; x < GRID_X_SIZE; x++) {
-        for(uint16_t y = 0; y < GRID_Y_SIZE; y++) {
-            printf("X: %u, Y: %u, Value: %f\n", x, y, grid[x][y]);
-        }
+void init_mutex_and_cond() {
+    int retval = pthread_mutex_init(&cycle_mutex, NULL);
+    if(retval) {
+        printf("ERROR: Could not init mutex\n");
+        exit(-2);
     }
+    retval = pthread_cond_init(&enable_all_threads, NULL);
+    if(retval) {
+        printf("ERROR: Could not init cond var enable_all_threads\n");
+        exit(-2);
+    }
+    retval = pthread_cond_init(&monitor_check, NULL);
+    if(retval) {
+        printf("ERROR: Could not init cond var monitor_check\n");
+        exit(-2);
+    }
+}
+
+
+uint32_t gen_thread_mask(uint32_t number_of_threads) {
+    uint32_t thread_mask = 0;
+
+    for(uint32_t i = 0; i < number_of_threads; i++) {
+        thread_mask <<= 1;
+        thread_mask |= 0x1;
+    }
+    return thread_mask;
 }
 
 
 //*****************************************************************************
 // Init Functions
 //*****************************************************************************
-void init_grid(double grid[GRID_X_SIZE][GRID_Y_SIZE]) {
+void init_grid(float grid[GRID_X_SIZE][GRID_Y_SIZE]) {
+    const uint16_t min_cord = 200;
+    const uint16_t max_cord = 800;
+    const float center_temp = 500.0;
+    const float border_temp = 0.0;
     bool x_in_center = false;
     bool y_in_center = false;
 
     for(uint16_t x = 0; x < GRID_X_SIZE; x++) {
         for(uint16_t y = 0; y < GRID_Y_SIZE; y++) {
-            x_in_center = (x >= 200) && (x <= 800);
-            y_in_center = (y >= 200) && (y <= 800);
-            if( x_in_center && y_in_center ) grid[x][y] = 500.0;
-            else grid[x][y] = 0.0;
+            x_in_center = (x >= min_cord) && (x <= max_cord);
+            y_in_center = (y >= min_cord) && (y <= max_cord);
+            if( x_in_center && y_in_center ) grid[x][y] = center_temp;
+            else grid[x][y] = border_temp;
         }
     }
 }
 
 
 pthread_t* allocate_threads(uint32_t number_of_threads) {
-    pthread_t* threads = malloc( sizeof(pthread_t) * number_of_threads );
+    uint32_t threads_and_monitor = number_of_threads + 1;
+
+    pthread_t* threads = malloc( sizeof(pthread_t) * threads_and_monitor );
     if(threads == NULL) {
         printf("ERROR: Threads malloc returned NULL. Attempted to malloc %u threads\n", number_of_threads);
         exit(-1);
@@ -171,67 +198,36 @@ pthread_t* allocate_threads(uint32_t number_of_threads) {
 }
 
 
-pthread_mutex_t* allocate_mutexs(uint32_t number_of_threads) {
-    pthread_mutex_t* mutexs = malloc( sizeof(pthread_mutex_t) * number_of_threads );
-    if(mutexs == NULL) {
-        printf("ERROR: Mutexs malloc returned NULL. Attempted to malloc %u mutexs\n", number_of_threads);
-        exit(-1);
-    }
-    return mutexs;
-}
-
-
-uint16_t* allocate_thread_cycles(uint32_t number_of_threads) {
-    uint16_t* thread_cycles = malloc( sizeof(uint16_t) * number_of_threads );
-    if(thread_cycles == NULL) {
-        printf("ERROR: thread_cycles malloc returned NULL. Attempted to malloc %u thread_cycles\n", number_of_threads);
-        exit(-1);
-    }
-    
-    // Initialize to 0
-    for(uint32_t i = 0; i < number_of_threads; i++) {
-        thread_cycles[i] = 0;
-    }
-
-    return thread_cycles;
-}
-
-
-void init_mutexs(pthread_mutex_t* mutexs, uint32_t number_of_threads) {
-    int retval;
-    for(uint32_t i = 0; i < number_of_threads; i++) {
-        retval = pthread_mutex_init(&mutexs[i], NULL);
-        if(retval) {
-            printf("ERROR: Could not init mutex number %u\n", i);
-            exit(-2);
-        }
-    }
-}
-
-
 thread_args* create_threads(pthread_t* threads, uint32_t number_of_threads) {
-    uint16_t x_per_thread = GRID_X_SIZE / number_of_threads;
     thread_args* args = malloc( sizeof(thread_args) * number_of_threads);
     if(args == NULL) {
         printf("ERROR: Thread args malloc failed. Tried to malloc %u\n", number_of_threads);
         exit(-1);
     }
 
+    const uint16_t time_ticks = 6001;
+    uint16_t x_per_thread = GRID_X_SIZE / number_of_threads;
+    uint32_t last_thread = number_of_threads - 1;
     for(uint32_t i = 0; i < number_of_threads; i++) {
         args[i].thread_id = i;
         args[i].start_x = x_per_thread * i;
-        args[i].end_x = x_per_thread * (i + 1);
-        args[i].time_ticks = 6000;
-        //args[i].grid1 = heat_grid1;
-        //args[i].grid2 = heat_grid2;
+        if(i == last_thread) args[i].end_x = GRID_X_SIZE;
+        else args[i].end_x = x_per_thread * (i + 1);
+        args[i].time_ticks = time_ticks;
         pthread_create(&threads[i], NULL, &run_heat_calculations, (void*)&args[i]);
     }
+
+    // Last thread is always monitor
+    pthread_create(&threads[number_of_threads], NULL, &monitor, (void*)time_ticks);
+
     return args;
 }
 
 
 void run_threads(pthread_t* threads, uint32_t number_of_threads) {
-    for(uint32_t i = 0; i < number_of_threads; i++) {
+    uint32_t threads_and_monitor = number_of_threads + 1;
+
+    for(uint32_t i = 0; i < threads_and_monitor; i++) {
         pthread_join(threads[i], NULL);
     }
 }
@@ -239,69 +235,60 @@ void run_threads(pthread_t* threads, uint32_t number_of_threads) {
 
 void* run_heat_calculations(void* void_args) {
     thread_args* args = (thread_args*)void_args;
-    static bool local_grid1_older = true;
+    bool grid1_is_older = 1;
+    uint32_t thread_flag_bit = 1 << args->thread_id;
 
     for(uint16_t tick = 0; tick < args->time_ticks; tick++) {
         for(uint16_t x = args->start_x; x < args->end_x; x++) {
             for(uint16_t y = 0; y < GRID_Y_SIZE; y++) {
-                if(local_grid1_older) heat_grid2[x][y] = calc_heat_value(heat_grid1, (int)x, (int)y);
+                if(grid1_is_older) heat_grid2[x][y] = calc_heat_value(heat_grid1, (int)x, (int)y);
                 else heat_grid1[x][y] = calc_heat_value(heat_grid2, (int)x, (int)y);
             }
         }
+        grid1_is_older ^= 1;
 
-        // Thread 0 prints the required info at 200 cycle intervals
-        // Do this first so that cycle 200 is complete but we haven't flipped
-        // to the new array yet - actually showing the data from cycle 200
-        if(args->thread_id == 0) {
-            if( (thread_cycles[args->thread_id] % 200) == 0 ) {
-                if(local_grid1_older) print_interval_step(heat_grid2);
-                else print_interval_step(heat_grid1);
+        pthread_mutex_lock(&cycle_mutex);
+            threads_done |= thread_flag_bit;
+            pthread_cond_signal(&monitor_check);
+
+            while(threads_done & thread_flag_bit) {
+                pthread_cond_wait(&enable_all_threads, &cycle_mutex);
             }
-        }
-
-        // Flip to the other array to use as the reference data
-        if(local_grid1_older) local_grid1_older = false;
-        else local_grid1_older = true;
-
-        // This is the only place a thread can write to this value
-        pthread_mutex_lock(&mutexs[args->thread_id]);
-            thread_cycles[args->thread_id] += 1;
-        pthread_mutex_unlock(&mutexs[args->thread_id]);
-
-        // Wait on previous thread to catch if not the left most thread
-        // Do not need to get the mutex for our own thread since we are the only one that
-        // can write our own cycles
-        bool exit_loop = false;
-        if(args->thread_id != 0) {
-            while(!exit_loop) {
-                pthread_mutex_lock(&mutexs[args->thread_id - 1]);
-                    if(thread_cycles[args->thread_id] == thread_cycles[args->thread_id - 1])
-                        exit_loop = true;
-                pthread_mutex_unlock(&mutexs[args->thread_id - 1]);
-            }
-        }
-
-        // Wait for next thread to catch up if not the right most thread.
-        // Do not need to get the mutex for our own thread since we are the only one that
-        // can write our own cycles
-        exit_loop = false;
-        if(args->thread_id != (number_of_threads - 1) ) {
-            while(!exit_loop) {
-                pthread_mutex_lock(&mutexs[args->thread_id + 1]);
-                    if(thread_cycles[args->thread_id] == thread_cycles[args->thread_id + 1])
-                        exit_loop = true;
-                pthread_mutex_unlock(&mutexs[args->thread_id + 1]);
-            }
-        }
+        pthread_mutex_unlock(&cycle_mutex);
     }
-
-    pthread_exit(0);
+    return 0;
 }
 
 
-double get_heat_value(double grid[GRID_X_SIZE][GRID_Y_SIZE], int x, int y) {
-    const double out_of_bounds_heat_value = 0;
-    double heat_value;
+void* monitor(void* args) {
+    const uint16_t cycle_interval = 200;
+    uint16_t iterations = (uint16_t)args;
+    bool grid1_is_older = 1;
+
+    for(uint16_t cycle = 0; cycle < iterations; cycle++) {
+        if( (cycle % cycle_interval) == 0 ) {
+            if(grid1_is_older) print_interval_step(heat_grid2, cycle);
+            else print_interval_step(heat_grid1, cycle);
+        }
+
+        pthread_mutex_lock(&cycle_mutex);
+            while(threads_done != all_threads_done_mask) {
+                pthread_cond_wait(&monitor_check, &cycle_mutex);
+            }
+            threads_done = 0;
+        pthread_mutex_unlock(&cycle_mutex);
+        pthread_cond_broadcast(&enable_all_threads);
+
+        grid1_is_older ^= 1;
+    }
+
+    return 0;
+}
+
+
+float get_heat_value(float grid[GRID_X_SIZE][GRID_Y_SIZE], int x, int y) {
+    const float out_of_bounds_heat_value = 0.0;
+    float heat_value;
     bool x_out_of_bounds = (x < 0) || (x >= GRID_X_SIZE);
     bool y_out_of_bounds = (y < 0) || (y >= GRID_Y_SIZE);
 
@@ -312,17 +299,17 @@ double get_heat_value(double grid[GRID_X_SIZE][GRID_Y_SIZE], int x, int y) {
 }
 
 
-double calc_heat_value(double past_grid[GRID_X_SIZE][GRID_Y_SIZE],
+float calc_heat_value(float past_grid[GRID_X_SIZE][GRID_Y_SIZE],
                        int x, int y) {
-    const double Cx = 0.12;
-    const double Cy = 0.1;
-    double Uxy = get_heat_value(past_grid, x, y);
-    double Uxm1y = get_heat_value(past_grid, x - 1, y);
-    double Uxp1y = get_heat_value(past_grid, x + 1, y);
-    double Uxym1 = get_heat_value(past_grid, x, y - 1);
-    double Uxyp1 = get_heat_value(past_grid, x, y + 1);
+    const float Cx = 0.12;
+    const float Cy = 0.1;
+    float Uxy = get_heat_value(past_grid, x, y);
+    float Uxm1y = get_heat_value(past_grid, x - 1, y);
+    float Uxp1y = get_heat_value(past_grid, x + 1, y);
+    float Uxym1 = get_heat_value(past_grid, x, y - 1);
+    float Uxyp1 = get_heat_value(past_grid, x, y + 1);
 
-    double result = Uxy + \
+    float result = Uxy + \
                     Cx * (Uxp1y + Uxm1y - (2.0 * Uxy)) + \
                     Cy * (Uxyp1 + Uxym1 - (2.0 * Uxy));
 
@@ -331,17 +318,23 @@ double calc_heat_value(double past_grid[GRID_X_SIZE][GRID_Y_SIZE],
 
 void cleanup() {
     int retval;
-    for(uint32_t i = 0; i < number_of_threads; i++) {
-        retval = pthread_mutex_destroy(&mutexs[i]);
-        if(retval) {
-            printf("ERROR: Could not destroy mutex number %u\n", i);
-            exit(-2);
-        }
+    retval = pthread_mutex_destroy(&cycle_mutex);
+    if(retval) {
+        printf("ERROR: Could not destroy mutex\n");
+        exit(-2);
+    }
+    retval = pthread_cond_destroy(&enable_all_threads);
+    if(retval) {
+        printf("ERROR: Could not destroy cond var enable_all_threads\n");
+        exit(-2);
+    }
+    retval = pthread_cond_destroy(&monitor_check);
+    if(retval) {
+        printf("ERROR: Could not destroy cond var monitor_check\n");
+        exit(-2);
     }
 
     free(threads);
-    free(mutexs);
-    free(thread_cycles);
     free(args);
 }
 
