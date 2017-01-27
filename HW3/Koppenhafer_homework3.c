@@ -205,7 +205,7 @@ thread_args* create_threads(pthread_t* threads, uint32_t number_of_threads) {
         exit(-1);
     }
 
-    const uint16_t time_ticks = 6001;
+    const uint16_t time_ticks = 6000;
     uint16_t x_per_thread = GRID_X_SIZE / number_of_threads;
     uint32_t last_thread = number_of_threads - 1;
     for(uint32_t i = 0; i < number_of_threads; i++) {
@@ -238,7 +238,7 @@ void* run_heat_calculations(void* void_args) {
     bool grid1_is_older = 1;
     uint32_t thread_flag_bit = 1 << args->thread_id;
 
-    for(uint16_t tick = 0; tick < args->time_ticks; tick++) {
+    for(uint16_t tick = 0; tick <= args->time_ticks; tick++) {
         for(uint16_t x = args->start_x; x < args->end_x; x++) {
             for(uint16_t y = 0; y < GRID_Y_SIZE; y++) {
                 if(grid1_is_older) heat_grid2[x][y] = calc_heat_value(heat_grid1, (int)x, (int)y);
@@ -265,7 +265,7 @@ void* monitor(void* args) {
     uint16_t iterations = (uint16_t)args;
     bool grid1_is_older = 1;
 
-    for(uint16_t cycle = 0; cycle < iterations; cycle++) {
+    for(uint16_t cycle = 0; cycle <= iterations; cycle++) {
         if( (cycle % cycle_interval) == 0 ) {
             if(grid1_is_older) print_interval_step(heat_grid2, cycle);
             else print_interval_step(heat_grid1, cycle);
