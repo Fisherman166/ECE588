@@ -13,32 +13,32 @@
 #define MASTER 0           /* task ID of master task */
 #define NUM_TICKS 6000
 
+
 static float* heat_grid1 = NULL;
+static int numtasks;
 
 
 float* allocate_grid(uint32_t, uint32_t);
 void print_grid(float*, uint32_t, uint32_t);
 void init_grid(float*);
-
+static bool is_first_task(int);
+static bool is_last_task(int, int);
 void print_interval_step(float grid[GRID_X_SIZE][GRID_Y_SIZE], uint16_t);
-float get_heat_value(float*, int, int);
-float calc_heat_value(float*, int, int);
+
+void scatter_and_send(float*, uint16_t, int, int);
+float get_heat_value(float*, int, int, int);
+float calc_heat_value(float*, int, int, int);
 
 int main (int argc, char *argv[])
 {
     struct timespec StartTime, EndTime;
+    int	taskid;
     int ret;
     uint16_t x_per_thread;
-    double	localsum, sum; 
     float* past_grid;
     float* next_grid;
-    int	taskid;
-    int numtasks;
-    int return_code;
     long start_x;
     long end_x;
-    bool is_last_thread;
-    uint16_t ticks;
     uint16_t x;
     uint16_t y;
     uint32_t grid_pos;
@@ -62,34 +62,32 @@ int main (int argc, char *argv[])
     x_per_thread = GRID_X_SIZE / numtasks;
     start_x = x_per_thread * taskid;
 
-    is_last_thread = taskid == (numtasks-1);
-    if(is_last_thread) end_x = GRID_X_SIZE;
+    if( is_last_task(taskid, numtasks) ) end_x = GRID_X_SIZE;
     else end_x = x_per_thread * (taskid + 1);
 
-    past_grid = allocate_grid(x_per_thread, GRID_Y_SIZE);
-    next_grid = allocate_grid(x_per_thread, GRID_Y_SIZE);
+    past_grid = allocate_grid(x_per_thread + 2, GRID_Y_SIZE);
+    next_grid = allocate_grid(x_per_thread + 2, GRID_Y_SIZE);
 
-    //Magic happens
-    MPI_Scatter(heat_grid1, x_per_thread * GRID_Y_SIZE, MPI_FLOAT,
-                past_grid, x_per_thread * GRID_Y_SIZE, MPI_FLOAT,
-                MASTER, MPI_COMM_WORLD);
-
-    printf("Thread id: %u, start: %u, end: %u\n", taskid, start_x, end_x);
-
-    for(x = start_x; x < end_x; x++) {
-        printf("%u, X: %u\n", taskid, x);
+    scatter_and_send(past_grid, x_per_thread, taskid, numtasks);
+    
+    for(x = 0; x < x_per_thread; x++) {
         for(y = 0; y < GRID_Y_SIZE; y++) {
             grid_pos = (x * GRID_Y_SIZE) + y;
-            next_grid[grid_pos] = calc_heat_value(past_grid, (int)x, (int)y);
+            next_grid[grid_pos] = calc_heat_value(past_grid, (int)x, (int)y, taskid);
         }
     }
-    printf("GOT OUT\n");
 
     MPI_Gather(next_grid, x_per_thread * GRID_Y_SIZE, MPI_FLOAT,
                heat_grid1, x_per_thread * GRID_Y_SIZE, MPI_FLOAT,
                MASTER, MPI_COMM_WORLD);
 
+    if(taskid == 0) {
     print_grid(heat_grid1, GRID_X_SIZE, GRID_Y_SIZE);
+    exit(0);
+    }
+    else {
+        while(1);
+    }
 
 
     /* Master prints sum */
@@ -103,6 +101,8 @@ int main (int argc, char *argv[])
     MPI_Finalize();
 
     free(heat_grid1);
+    free(past_grid);
+    free(next_grid);
     return 0;
 }
 
@@ -113,6 +113,20 @@ int main (int argc, char *argv[])
 //           heat_grid1[1][1], heat_grid1[150][150], heat_grid1[400][400], heat_grid1[500][500],
 //           heat_grid1[750][750], heat_grid1[900][900]);
 //}
+
+
+
+static bool is_last_task(int taskid, int numtasks) {
+    int last_task = numtasks - 1;
+    if(taskid == last_task) return 1;
+    return 0;
+}
+
+
+static bool is_first_task(int taskid) {
+    if(taskid == 0) return 1;
+    return 0;
+}
 
 
 void init_grid(float* grid) {
@@ -138,27 +152,36 @@ void init_grid(float* grid) {
 }
 
 
-float get_heat_value(float* grid, int x, int y) {
+float get_heat_value(float* grid, int x, int y, int taskid) {
     const float out_of_bounds_heat_value = 0.0;
+    const uint16_t low_x_position = 500;
+    const uint16_t high_x_position = 501;
     float heat_value;
-    bool x_out_of_bounds = (x < 0) || (x >= GRID_X_SIZE);
+    bool x_out_of_bounds = ((x < 1) && (taskid == 0)) || 
+                           ((x > 499) && is_last_task(taskid, numtasks));
     bool y_out_of_bounds = (y < 0) || (y >= GRID_Y_SIZE);
+    bool is_low_x_border = (x == -1) && (taskid == 1);
+    bool is_high_x_border = (x == 500) && (taskid == 0);
 
     if( x_out_of_bounds || y_out_of_bounds) heat_value = out_of_bounds_heat_value;
+    else if( is_low_x_border ) heat_value = grid[ (low_x_position * GRID_Y_SIZE) + y];
+    else if( is_high_x_border ) heat_value = grid[ (high_x_position * GRID_Y_SIZE) + y];
     else heat_value = grid[ (x * GRID_Y_SIZE) + y];
+
+    if( is_low_x_border) printf("taskid %d, %d, %d, %f\n", taskid, x, y, heat_value);
 
     return heat_value;
 }
 
 
-float calc_heat_value(float* past_grid, int x, int y) {
+float calc_heat_value(float* past_grid, int x, int y, int taskid) {
     const float Cx = 0.12;
     const float Cy = 0.1;
-    float Uxy = get_heat_value(past_grid, x, y);
-    float Uxm1y = get_heat_value(past_grid, x - 1, y);
-    float Uxp1y = get_heat_value(past_grid, x + 1, y);
-    float Uxym1 = get_heat_value(past_grid, x, y - 1);
-    float Uxyp1 = get_heat_value(past_grid, x, y + 1);
+    float Uxy = get_heat_value(past_grid, x, y, taskid);
+    float Uxm1y = get_heat_value(past_grid, x - 1, y, taskid);
+    float Uxp1y = get_heat_value(past_grid, x + 1, y, taskid);
+    float Uxym1 = get_heat_value(past_grid, x, y - 1, taskid);
+    float Uxyp1 = get_heat_value(past_grid, x, y + 1, taskid);
 
     float result = Uxy + \
                     Cx * (Uxp1y + Uxm1y - (2.0 * Uxy)) + \
@@ -197,5 +220,45 @@ float* allocate_grid(uint32_t x_size, uint32_t y_size) {
     }
 
     return grid;
+}
+
+
+void scatter_and_send(float* past_grid, uint16_t x_per_thread, int taskid, int num_tasks) {
+    const int send_low_column = 0;
+    const int send_high_column = 1;
+    float* lower_column;
+    float* upper_column;
+    int next_taskid;
+    int test;
+    int out;
+    test = 0;
+
+    MPI_Scatter(heat_grid1, x_per_thread * GRID_Y_SIZE, MPI_FLOAT,
+                past_grid, x_per_thread * GRID_Y_SIZE, MPI_FLOAT,
+                MASTER, MPI_COMM_WORLD);
+
+    next_taskid = ((taskid + num_tasks) - 1) % num_tasks; 
+    if( is_first_task(taskid) ) {
+        lower_column = &(heat_grid1[0]);
+        upper_column = &(heat_grid1[  (x_per_thread - 1) * GRID_Y_SIZE ]);
+    }
+    else if( is_last_task(taskid, num_tasks) ) {
+        lower_column = &(heat_grid1[ x_per_thread * GRID_Y_SIZE ]);
+        upper_column = &(heat_grid1[ ((x_per_thread -1) * taskid) * GRID_Y_SIZE ]);
+    }
+
+    if(taskid != 0) {
+        MPI_Send(lower_column, GRID_Y_SIZE, MPI_FLOAT, next_taskid, send_low_column, MPI_COMM_WORLD);
+    }
+    else {
+        MPI_Recv(&(past_grid[x_per_thread * GRID_Y_SIZE]), GRID_Y_SIZE, MPI_FLOAT, next_taskid, send_low_column, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    }
+
+    if(taskid == 0) {
+        MPI_Send(upper_column, GRID_Y_SIZE, MPI_FLOAT, next_taskid, send_high_column, MPI_COMM_WORLD);
+    }
+    else {
+        MPI_Recv(&(past_grid[ (x_per_thread + 1) * GRID_Y_SIZE]), GRID_Y_SIZE, MPI_FLOAT, next_taskid, send_high_column, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    }
 }
 
