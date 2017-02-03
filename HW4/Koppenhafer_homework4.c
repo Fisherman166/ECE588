@@ -1,3 +1,11 @@
+//*****************************************************************************
+//
+// Homework 4 - ECE588
+// Written by: Sean Koppenhafer (Koppen2)
+// 02/03/2017
+//
+//*****************************************************************************
+
 #include "mpi.h"
 #include <inttypes.h>
 #include <stdbool.h>
@@ -21,7 +29,7 @@ static uint16_t x_per_thread;
 
 float* allocate_grid(uint32_t, uint32_t);
 void init_grid(float*);
-void calc_per_thread_values(uint16_t*, uint16_t*, uint16_t*, uint16_t*, int, int);
+void calc_per_thread_values(uint16_t*, uint16_t*, uint16_t*, int, int);
 
 
 static bool is_first_task(int);
@@ -55,7 +63,6 @@ int main (int argc, char *argv[])
     uint16_t y;
     uint32_t grid_pos;
     uint16_t cycle;
-    uint16_t start_end_diff;
 
     MPI_Status status;
 
@@ -66,14 +73,13 @@ int main (int argc, char *argv[])
     MPI_Init(&argc,&argv);
     MPI_Comm_size(MPI_COMM_WORLD,&numtasks);
     MPI_Comm_rank(MPI_COMM_WORLD,&taskid);
-    printf ("MPI task %d has started...\n", taskid);
 
     if (taskid == MASTER) {
         ret = clock_gettime(CLOCK_REALTIME, &StartTime);
         assert(ret == 0);
     }
 
-    calc_per_thread_values(&x_per_thread, &start_x, &end_x, &start_end_diff, taskid, numtasks);
+    calc_per_thread_values(&x_per_thread, &start_x, &end_x, taskid, numtasks);
 
     // Allocate 2 extra columns for the lower and higher columns that need to be passed from
     // the lower and higher task
@@ -159,14 +165,11 @@ void init_grid(float* grid) {
 
 
 void calc_per_thread_values(uint16_t* x_per_thread, uint16_t* start_x, uint16_t* end_x,
-                            uint16_t* diff, int taskid, int numtasks) {
+                            int taskid, int numtasks) {
     *x_per_thread = GRID_X_SIZE / numtasks;
     *start_x = *x_per_thread * taskid;
 
-    if( is_last_task(taskid, numtasks) ) {
-        *end_x = GRID_X_SIZE;
-        *diff = start_and_end_differece(*start_x, *end_x);
-    }
+    if( is_last_task(taskid, numtasks) ) *end_x = GRID_X_SIZE;
     else *end_x = *x_per_thread * (taskid + 1);
 }
 
@@ -203,29 +206,36 @@ void scatter_and_send(float* past_grid, uint16_t x_per_thread, int taskid, int n
     float* upper_column;
     int next_taskid, last_taskid;
     uint32_t grid_pos = 0;
+    uint16_t lower_column_x = x_per_thread + 1; // Lower column of current task is upper column of previous task
+    uint16_t upper_column_x = x_per_thread; // Upper column of current task is lower column of previous task
+
 
     MPI_Scatter(heat_grid, x_per_thread * GRID_Y_SIZE, MPI_FLOAT,
                 past_grid, x_per_thread * GRID_Y_SIZE, MPI_FLOAT,
                 MASTER, MPI_COMM_WORLD);
 
+    // For a single thread this is not required
+    if(num_tasks > 1) {
+        // First column in past grid is always the lower column to pass.
+        grid_pos = calc_grid_position(0, 0);
+        lower_column = &(past_grid[grid_pos]);
 
-    grid_pos = calc_grid_position(0, 0);
-    lower_column = &(past_grid[grid_pos]);
-    grid_pos = calc_grid_position(x_per_thread - 1, 0);
-    upper_column = &(past_grid[grid_pos]);
+        // Last column in past grid is always the upper column to pass.
+        grid_pos = calc_grid_position(x_per_thread - 1, 0);
+        upper_column = &(past_grid[grid_pos]);
 
+        if( is_first_task(taskid) ) last_taskid = numtasks - 1;
+        else last_taskid = taskid - 1;
+        next_taskid = ((taskid + num_tasks) + 1) % num_tasks;
 
-    if( is_first_task(taskid) ) last_taskid = numtasks - 1;
-    else last_taskid = taskid - 1;
-    next_taskid = ((taskid + num_tasks) + 1) % num_tasks;
+        MPI_Send(lower_column, GRID_Y_SIZE, MPI_FLOAT, last_taskid, send_low_column, MPI_COMM_WORLD);
+        grid_pos = calc_grid_position(lower_column_x, 0);
+        MPI_Recv(&(past_grid[grid_pos]), GRID_Y_SIZE, MPI_FLOAT, next_taskid, send_low_column, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 
-    MPI_Send(lower_column, GRID_Y_SIZE, MPI_FLOAT, last_taskid, send_low_column, MPI_COMM_WORLD);
-    grid_pos = calc_grid_position(x_per_thread + 1, 0);
-    MPI_Recv(&(past_grid[grid_pos]), GRID_Y_SIZE, MPI_FLOAT, next_taskid, send_low_column, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-    MPI_Send(upper_column, GRID_Y_SIZE, MPI_FLOAT, next_taskid, send_high_column, MPI_COMM_WORLD);
-    grid_pos = calc_grid_position(x_per_thread, 0);
-    MPI_Recv(&(past_grid[grid_pos]), GRID_Y_SIZE, MPI_FLOAT, last_taskid, send_high_column, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Send(upper_column, GRID_Y_SIZE, MPI_FLOAT, next_taskid, send_high_column, MPI_COMM_WORLD);
+        grid_pos = calc_grid_position(upper_column_x, 0);
+        MPI_Recv(&(past_grid[grid_pos]), GRID_Y_SIZE, MPI_FLOAT, last_taskid, send_high_column, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    }
 }
 
 
